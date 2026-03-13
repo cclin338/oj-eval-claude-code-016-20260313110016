@@ -6,9 +6,10 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <map>
 
-const int M = 100; // Order of B+ tree (max children for internal node)
-const int L = 100; // Max entries for leaf node
+const int M = 200; // Order of B+ tree (max children for internal node)
+const int L = 200; // Max entries for leaf node
 
 // Key type: string with max 64 bytes
 struct Key {
@@ -49,7 +50,7 @@ struct Pair {
 enum NodeType { INTERNAL, LEAF };
 
 // File position type
-typedef long long FilePos;
+typedef int FilePos;
 const FilePos NULL_POS = -1;
 
 // Internal node structure
@@ -79,44 +80,77 @@ private:
     FilePos root;
     FilePos freePos; // Next free position for allocation
 
-    // Read/Write nodes
+    // Simple LRU cache for nodes
+    static const int CACHE_SIZE = 100;
+    std::map<FilePos, LeafNode> leafCache;
+    std::map<FilePos, InternalNode> internalCache;
+
+    // Read/Write nodes with caching
     void writeInternal(FilePos pos, const InternalNode& node) {
-        file.seekp(pos);
+        internalCache[pos] = node;
+
+        file.seekp(pos * (sizeof(int) + sizeof(InternalNode)));
         int type = INTERNAL;
         file.write((char*)&type, sizeof(int));
         file.write((char*)&node, sizeof(InternalNode));
-        file.flush();
     }
 
     void writeLeaf(FilePos pos, const LeafNode& node) {
-        file.seekp(pos);
+        leafCache[pos] = node;
+
+        file.seekp(pos * (sizeof(int) + sizeof(LeafNode)));
         int type = LEAF;
         file.write((char*)&type, sizeof(int));
         file.write((char*)&node, sizeof(LeafNode));
-        file.flush();
     }
 
     NodeType readNodeType(FilePos pos) {
-        file.seekg(pos);
+        // Check cache first
+        if (internalCache.find(pos) != internalCache.end()) return INTERNAL;
+        if (leafCache.find(pos) != leafCache.end()) return LEAF;
+
+        file.seekg(pos * (sizeof(int) + std::max(sizeof(InternalNode), sizeof(LeafNode))));
         int type;
         file.read((char*)&type, sizeof(int));
         return (NodeType)type;
     }
 
     void readInternal(FilePos pos, InternalNode& node) {
-        file.seekg(pos + sizeof(int));
+        // Check cache first
+        if (internalCache.find(pos) != internalCache.end()) {
+            node = internalCache[pos];
+            return;
+        }
+
+        file.seekg(pos * (sizeof(int) + sizeof(InternalNode)) + sizeof(int));
         file.read((char*)&node, sizeof(InternalNode));
+        internalCache[pos] = node;
+
+        // Keep cache size under control
+        if (internalCache.size() > CACHE_SIZE) {
+            internalCache.erase(internalCache.begin());
+        }
     }
 
     void readLeaf(FilePos pos, LeafNode& node) {
-        file.seekg(pos + sizeof(int));
+        // Check cache first
+        if (leafCache.find(pos) != leafCache.end()) {
+            node = leafCache[pos];
+            return;
+        }
+
+        file.seekg(pos * (sizeof(int) + sizeof(LeafNode)) + sizeof(int));
         file.read((char*)&node, sizeof(LeafNode));
+        leafCache[pos] = node;
+
+        // Keep cache size under control
+        if (leafCache.size() > CACHE_SIZE) {
+            leafCache.erase(leafCache.begin());
+        }
     }
 
     FilePos allocateNode() {
-        FilePos pos = freePos;
-        freePos += sizeof(int) + std::max(sizeof(InternalNode), sizeof(LeafNode));
-        return pos;
+        return freePos++;
     }
 
     // Insert into leaf node
@@ -334,7 +368,7 @@ public:
             file.open(filename, std::ios::in | std::ios::out | std::ios::binary);
 
             // Initialize metadata
-            freePos = 2 * sizeof(FilePos);
+            freePos = 1;
             writeMetadata();
         } else {
             // Read metadata
@@ -345,6 +379,7 @@ public:
     ~BPlusTree() {
         if (file.is_open()) {
             writeMetadata();
+            file.flush();
             file.close();
         }
     }
@@ -353,7 +388,6 @@ public:
         file.seekp(0);
         file.write((char*)&root, sizeof(FilePos));
         file.write((char*)&freePos, sizeof(FilePos));
-        file.flush();
     }
 
     void readMetadata() {
@@ -396,6 +430,10 @@ public:
         findHelper(root, key, result);
         std::sort(result.begin(), result.end());
         return result;
+    }
+
+    void flush() {
+        file.flush();
     }
 };
 
